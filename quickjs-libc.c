@@ -92,6 +92,8 @@ typedef struct {
     BOOL has_object;
     int64_t timeout;
     JSValue func;
+    uint8_t repeat;
+    int64_t delay;
 } JSOSTimer;
 
 typedef struct {
@@ -1933,6 +1935,39 @@ static JSValue js_os_setTimeout(JSContext *ctx, JSValueConst this_val,
     return obj;
 }
 
+static JSValue js_os_setInterval(JSContext *ctx, JSValueConst this_val,
+                                int argc, JSValueConst *argv)
+{
+    JSRuntime *rt = JS_GetRuntime(ctx);
+    JSThreadState *ts = JS_GetRuntimeOpaque(rt);
+    int64_t delay;
+    JSValueConst func;
+    JSOSTimer *th;
+    JSValue obj;
+
+    func = argv[0];
+    if (!JS_IsFunction(ctx, func))
+        return JS_ThrowTypeError(ctx, "not a function");
+    if (JS_ToInt64(ctx, &delay, argv[1]))
+        return JS_EXCEPTION;
+    obj = JS_NewObjectClass(ctx, js_os_timer_class_id);
+    if (JS_IsException(obj))
+        return obj;
+    th = js_mallocz(ctx, sizeof(*th));
+    if (!th) {
+        JS_FreeValue(ctx, obj);
+        return JS_EXCEPTION;
+    }
+    th->has_object = TRUE;
+    th->timeout = get_time_ms() + delay;
+    th->func = JS_DupValue(ctx, func);
+    th->repeat = 1;
+    th->delay = delay;
+    list_add_tail(&th->link, &ts->os_timers);
+    JS_SetOpaque(obj, th);
+    return obj;
+}
+
 static JSValue js_os_clearTimeout(JSContext *ctx, JSValueConst this_val,
                                   int argc, JSValueConst *argv)
 {
@@ -2158,12 +2193,18 @@ static int js_os_poll(JSContext *ctx)
                 JSValue func;
                 /* the timer expired */
                 func = th->func;
+                call_handler(ctx, func);
+
+                if(th->repeat) {
+                  th->timeout = get_time_ms() + th->delay;
+                } else {
                 th->func = JS_UNDEFINED;
                 unlink_timer(rt, th);
                 if (!th->has_object)
                     free_timer(rt, th);
-                call_handler(ctx, func);
+
                 JS_FreeValue(ctx, func);
+                }
                 return 0;
             } else if (delay < min_delay) {
                 min_delay = delay;
@@ -3598,7 +3639,7 @@ static JSValue js_print(JSContext *ctx, JSValueConst this_val,
 
 void js_std_add_helpers(JSContext *ctx, int argc, char **argv)
 {
-    JSValue global_obj, console, args;
+    JSValue global_obj, console, args, window, window_external;
     int i;
 
     /* XXX: should these global definitions be enumerable? */
@@ -3623,8 +3664,27 @@ void js_std_add_helpers(JSContext *ctx, int argc, char **argv)
     JS_SetPropertyStr(ctx, global_obj, "__loadScript",
                       JS_NewCFunction(ctx, js_loadScript, "__loadScript", 1));
     
+    JS_SetPropertyStr(ctx, global_obj, "setTimeout",
+                      JS_NewCFunction(ctx, js_os_setTimeout, "setTimeout", 2));
+    JS_SetPropertyStr(ctx, global_obj, "setInterval",
+                      JS_NewCFunction(ctx, js_os_setInterval, "setInterval", 2));
+
+
     JS_FreeValue(ctx, global_obj);
+
+    window = JS_NewObject(ctx);
+    window_external =  JS_NewObject(ctx);
+    JS_SetPropertyStr(ctx, window, "external", window_external);
+    JS_SetPropertyStr(ctx, window_external, "writeTraceMessage",
+                      JS_NewCFunction(ctx, js_print, "writeTraceMessage", 1));
+
+    JS_SetPropertyStr(ctx, window_external, "writeErrorMessage",
+                      JS_NewCFunction(ctx, js_print, "writeErrorMessage", 1));
+
+    JS_SetPropertyStr(ctx, global_obj, "window", window);
+
 }
+
 
 void js_std_init_handlers(JSRuntime *rt)
 {
